@@ -41,6 +41,7 @@ type Proxy struct {
 	cfg      Config
 	rp       *httputil.ReverseProxy
 	cache    *cache
+	budget   *budget // nil without a daily budget
 	log      *log.Logger
 	inflight sync.WaitGroup
 }
@@ -56,6 +57,9 @@ func New(cfg Config) *Proxy {
 	p := &Proxy{cfg: cfg, log: cfg.Logger}
 	if cfg.CacheTTL > 0 {
 		p.cache = newCache(cfg.CacheTTL, maxCacheEntries, maxCacheBytes)
+	}
+	if cfg.DailyBudget > 0 && cfg.Store != nil {
+		p.budget = newBudget(cfg.DailyBudget, cfg.Store, cfg.Logger)
 	}
 	// Every request goes to the same host, so keep more than the default two
 	// idle connections to it and avoid a new TLS handshake per request.
@@ -84,14 +88,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tag := r.Header.Get(TagHeader)
 	r.Header.Del(TagHeader)
 
-	var key string
+	var key, model string
 	var addedUsage bool
 	addUsage := p.cfg.StreamUsage && strings.HasSuffix(r.URL.Path, "/chat/completions")
-	if r.Method == http.MethodPost && (p.cache != nil || addUsage) {
+	if r.Method == http.MethodPost && (p.cache != nil || addUsage || p.budget != nil) {
 		body, ok, err := readBody(r, maxReadBody)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", "llmproxy could not read the request body")
 			return
+		}
+		if ok && p.budget != nil {
+			model = requestModel(body)
 		}
 		// Cache hits cost nothing, so they are served even over budget.
 		if ok && p.cache != nil {
@@ -112,11 +119,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if p.overBudget(r.Context(), start) {
-		msg := fmt.Sprintf("llmproxy daily budget of $%.2f reached", p.cfg.DailyBudget)
-		writeError(w, http.StatusTooManyRequests, "budget_exceeded", msg)
-		p.log.Printf("%s %s 429 budget exceeded", r.Method, r.URL.Path)
-		return
+	release := func(float64) {}
+	if p.budget != nil {
+		var err error
+		if release, err = p.budget.admit(r.Context(), start, model); err != nil {
+			msg := fmt.Sprintf("llmproxy daily budget of $%.2f reached", p.cfg.DailyBudget)
+			writeError(w, http.StatusTooManyRequests, "budget_exceeded", msg)
+			p.log.Printf("%s %s 429 budget exceeded", r.Method, r.URL.Path)
+			return
+		}
 	}
 
 	rec := &recorder{ResponseWriter: w, status: http.StatusOK, hideUsageChunk: addedUsage}
@@ -129,7 +140,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if key != "" && rec.status == http.StatusOK && !rec.truncated {
 		p.cache.set(key, entry{status: rec.status, header: rec.Header().Clone(), body: bytes.Clone(rec.body.Bytes())})
 	}
-	p.finish(r, start, tag, rec.status, rec.usage(), false)
+	// Release only after the cost is recorded, so it is never counted zero times.
+	release(p.finish(r, start, tag, rec.status, rec.usage(), false))
+}
+
+// requestModel returns the "model" field of a JSON request body, or "".
+func requestModel(body []byte) string {
+	var req struct {
+		Model string `json:"model"`
+	}
+	json.Unmarshal(body, &req)
+	return req.Model
 }
 
 // Wait blocks until every request being served has finished and been recorded.
@@ -138,8 +159,9 @@ func (p *Proxy) Wait() {
 	p.inflight.Wait()
 }
 
-// finish records and logs a completed request. Cached responses cost nothing.
-func (p *Proxy) finish(r *http.Request, start time.Time, tag string, status int, u usage.Usage, cached bool) {
+// finish records and logs a completed request and returns its cost. Cached
+// responses cost nothing.
+func (p *Proxy) finish(r *http.Request, start time.Time, tag string, status int, u usage.Usage, cached bool) float64 {
 	latency := time.Since(start)
 	price, priced := p.cfg.Prices.Lookup(u.Model)
 	var cost float64
@@ -184,21 +206,7 @@ func (p *Proxy) finish(r *http.Request, start time.Time, tag string, status int,
 	}
 	fmt.Fprintf(&line, " %s", latency.Round(time.Millisecond))
 	p.log.Print(line.String())
-}
-
-// overBudget reports whether today's spend has reached the daily budget.
-// If the spend cannot be read, the request is let through.
-func (p *Proxy) overBudget(ctx context.Context, now time.Time) bool {
-	if p.cfg.DailyBudget <= 0 || p.cfg.Store == nil {
-		return false
-	}
-	y, m, d := now.Date()
-	spent, err := p.cfg.Store.SpentSince(ctx, time.Date(y, m, d, 0, 0, 0, 0, now.Location()))
-	if err != nil {
-		p.log.Printf("budget check: %v", err)
-		return false
-	}
-	return spent >= p.cfg.DailyBudget
+	return cost
 }
 
 // writeError sends an error in the {"error": {"type", "message"}} shape that

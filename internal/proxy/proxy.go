@@ -12,11 +12,12 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/amangeldievkuu/llmproxy/internal/pricing"
-	"github.com/amangeldievkuu/llmproxy/internal/store"
-	"github.com/amangeldievkuu/llmproxy/internal/usage"
+	"github.com/amangeldievkuu/llmproxy-go/internal/pricing"
+	"github.com/amangeldievkuu/llmproxy-go/internal/store"
+	"github.com/amangeldievkuu/llmproxy-go/internal/usage"
 )
 
 // TagHeader labels a request (by feature, user, environment...) in the usage
@@ -35,10 +36,11 @@ type Config struct {
 
 // Proxy is an http.Handler that forwards requests to Config.Upstream.
 type Proxy struct {
-	cfg   Config
-	rp    *httputil.ReverseProxy
-	cache *cache
-	log   *log.Logger
+	cfg      Config
+	rp       *httputil.ReverseProxy
+	cache    *cache
+	log      *log.Logger
+	inflight sync.WaitGroup
 }
 
 // New returns a Proxy for cfg.
@@ -51,9 +53,15 @@ func New(cfg Config) *Proxy {
 	}
 	p := &Proxy{cfg: cfg, log: cfg.Logger}
 	if cfg.CacheTTL > 0 {
-		p.cache = newCache(cfg.CacheTTL, maxCacheEntries)
+		p.cache = newCache(cfg.CacheTTL, maxCacheEntries, maxCacheBytes)
 	}
+	// Every request goes to the same host, so keep more than the default two
+	// idle connections to it and avoid a new TLS handshake per request.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 100
 	p.rp = &httputil.ReverseProxy{
+		Transport: transport,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(cfg.Upstream)
 			// Ask for an uncompressed response so the body can be parsed.
@@ -67,9 +75,31 @@ func New(cfg Config) *Proxy {
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	p.inflight.Add(1)
+	defer p.inflight.Done()
+
 	start := time.Now()
 	tag := r.Header.Get(TagHeader)
 	r.Header.Del(TagHeader)
+
+	// Cache hits cost nothing, so they are served even over budget.
+	var key string
+	if p.cache != nil && r.Method == http.MethodPost {
+		k, ok, err := cacheKey(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", "llmproxy could not read the request body")
+			return
+		}
+		if ok {
+			key = k
+			if e, ok := p.cache.get(key); ok {
+				e.writeTo(w)
+				u, _ := usage.Parse(e.header.Get("Content-Type"), e.body)
+				p.finish(r, start, tag, e.status, u, true)
+				return
+			}
+		}
+	}
 
 	if p.overBudget(r.Context(), start) {
 		msg := fmt.Sprintf("llmproxy daily budget of $%.2f reached", p.cfg.DailyBudget)
@@ -78,39 +108,31 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var key string
-	if p.cache != nil && r.Method == http.MethodPost {
-		k, err := cacheKey(r)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_request", "llmproxy could not read the request body")
-			return
-		}
-		key = k
-		if e, ok := p.cache.get(key); ok {
-			e.writeTo(w)
-			p.finish(r, start, tag, e.status, e.header.Get("Content-Type"), e.body, true)
-			return
-		}
-	}
-
 	rec := &recorder{ResponseWriter: w, status: http.StatusOK}
+	if key != "" {
+		rec.cacheMax = maxCacheEntrySize
+	}
 	p.rp.ServeHTTP(rec, r)
 
-	body := rec.body.Bytes()
 	if key != "" && rec.status == http.StatusOK && !rec.truncated {
-		p.cache.set(key, entry{status: rec.status, header: rec.Header().Clone(), body: bytes.Clone(body)})
+		p.cache.set(key, entry{status: rec.status, header: rec.Header().Clone(), body: bytes.Clone(rec.body.Bytes())})
 	}
-	p.finish(r, start, tag, rec.status, rec.Header().Get("Content-Type"), body, false)
+	p.finish(r, start, tag, rec.status, rec.usage(), false)
+}
+
+// Wait blocks until every request being served has finished and been recorded.
+// Call it after http.Server.Shutdown and before closing the store.
+func (p *Proxy) Wait() {
+	p.inflight.Wait()
 }
 
 // finish records and logs a completed request. Cached responses cost nothing.
-func (p *Proxy) finish(r *http.Request, start time.Time, tag string, status int, contentType string, body []byte, cached bool) {
+func (p *Proxy) finish(r *http.Request, start time.Time, tag string, status int, u usage.Usage, cached bool) {
 	latency := time.Since(start)
-	u, _ := usage.Parse(contentType, body)
 	price, priced := p.cfg.Prices.Lookup(u.Model)
 	var cost float64
 	if priced && !cached {
-		cost = price.Cost(u.InputTokens, u.OutputTokens)
+		cost = price.Cost(u)
 	}
 
 	if p.cfg.Store != nil {

@@ -22,7 +22,7 @@ func unset(t *testing.T, key string) {
 }
 
 func TestLoadDotEnv(t *testing.T) {
-	for _, k := range []string{"LLMPROXY_T_PLAIN", "LLMPROXY_T_EXPORT", "LLMPROXY_T_DOUBLE", "LLMPROXY_T_SINGLE", "LLMPROXY_T_COMMENT"} {
+	for _, k := range []string{"LLMPROXY_T_PLAIN", "LLMPROXY_T_EXPORT", "LLMPROXY_T_DOUBLE", "LLMPROXY_T_SINGLE", "LLMPROXY_T_COMMENT", "LLMPROXY_T_QCOMMENT"} {
 		unset(t, k)
 	}
 	t.Setenv("LLMPROXY_T_SHELL", "from-shell")
@@ -34,6 +34,7 @@ export LLMPROXY_T_EXPORT=yes
 LLMPROXY_T_DOUBLE="hello # not a comment"
 LLMPROXY_T_SINGLE='single'
 LLMPROXY_T_COMMENT=value # trailing comment
+LLMPROXY_T_QCOMMENT="quoted # value" # trailing comment
 LLMPROXY_T_SHELL=from-file
 `)
 	if err := loadDotEnv(path); err != nil {
@@ -41,12 +42,13 @@ LLMPROXY_T_SHELL=from-file
 	}
 
 	want := map[string]string{
-		"LLMPROXY_T_PLAIN":   "9000",
-		"LLMPROXY_T_EXPORT":  "yes",
-		"LLMPROXY_T_DOUBLE":  "hello # not a comment",
-		"LLMPROXY_T_SINGLE":  "single",
-		"LLMPROXY_T_COMMENT": "value",
-		"LLMPROXY_T_SHELL":   "from-shell", // the environment wins over the file
+		"LLMPROXY_T_PLAIN":    "9000",
+		"LLMPROXY_T_EXPORT":   "yes",
+		"LLMPROXY_T_DOUBLE":   "hello # not a comment",
+		"LLMPROXY_T_SINGLE":   "single",
+		"LLMPROXY_T_COMMENT":  "value",
+		"LLMPROXY_T_QCOMMENT": "quoted # value",
+		"LLMPROXY_T_SHELL":    "from-shell", // the environment wins over the file
 	}
 	for k, v := range want {
 		if got := os.Getenv(k); got != v {

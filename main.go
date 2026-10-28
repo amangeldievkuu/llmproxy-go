@@ -5,13 +5,18 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime/debug"
 )
+
+// version is set at release time with -ldflags "-X main.version=v1.2.3".
+var version string
 
 const usageText = `llmproxy tracks the cost and latency of your LLM API calls.
 
 Usage:
   llmproxy serve [flags]   run the proxy
   llmproxy stats [flags]   show spend from the local database
+  llmproxy version         print the version
 
 Run "llmproxy <command> -h" to see a command's flags.
 `
@@ -33,6 +38,8 @@ func main() {
 		err = runServe(args)
 	case "stats":
 		err = runStats(args, os.Stdout)
+	case "version", "-version", "--version":
+		fmt.Println("llmproxy", buildVersion())
 	case "help", "-h", "--help":
 		fmt.Print(usageText)
 	default:
@@ -51,4 +58,16 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// buildVersion returns the release version, or the module version recorded by
+// "go install", or "dev".
+func buildVersion() string {
+	if version != "" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
 }

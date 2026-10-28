@@ -43,10 +43,15 @@ func loadDotEnv(path string) error {
 }
 
 // parseValue strips matching quotes, or a trailing " # comment" from an unquoted value.
+// A quoted value may also be followed by a comment.
 func parseValue(v string) string {
 	v = strings.TrimSpace(v)
-	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
-		return v[1 : len(v)-1]
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') {
+		if end := strings.IndexByte(v[1:], v[0]) + 1; end > 0 {
+			if rest := strings.TrimSpace(v[end+1:]); rest == "" || strings.HasPrefix(rest, "#") {
+				return v[1:end]
+			}
+		}
 	}
 	if i := strings.Index(v, " #"); i >= 0 {
 		v = strings.TrimSpace(v[:i])

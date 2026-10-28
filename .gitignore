@@ -1,5 +1,6 @@
 # Binary
 /llmproxy
+/llmproxy-go
 
 # Usage databases
 *.db
@@ -8,3 +9,6 @@
 
 # Local secrets
 .env
+
+# Release builds
+/dist/

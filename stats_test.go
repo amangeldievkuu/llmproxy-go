@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/amangeldievkuu/llmproxy/internal/store"
+	"github.com/amangeldievkuu/llmproxy-go/internal/store"
 )
 
 func TestStats(t *testing.T) {

@@ -61,6 +61,12 @@ func TestCost(t *testing.T) {
 			(1000*2 + 1000*0.2 + 10*20) / 1e6},
 		{"unset cache price uses input price", Price{Input: 2}, usage.Usage{InputTokens: 100, CacheReadTokens: 100},
 			100 * 2 / 1e6},
+		{"1-hour cache writes", Price{Input: 1, CacheWrite: 1.25, CacheWrite1h: 2},
+			usage.Usage{InputTokens: 100, CacheWriteTokens: 90, CacheWrite1hTokens: 60},
+			(10*1 + 30*1.25 + 60*2) / 1e6},
+		{"unset 1-hour price uses cache write price", Price{Input: 1, CacheWrite: 1.25},
+			usage.Usage{InputTokens: 100, CacheWriteTokens: 90, CacheWrite1hTokens: 60},
+			(10*1 + 90*1.25) / 1e6},
 	}
 	for _, tt := range tests {
 		if got := tt.price.Cost(tt.u); math.Abs(got-tt.want) > 1e-12 {

@@ -93,6 +93,15 @@ func TestParse(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			name:        "anthropic 1-hour cache writes",
+			contentType: "application/json",
+			body: `{"model":"claude-opus-5-5","usage":{"input_tokens":10,"cache_creation_input_tokens":900,
+				"cache_creation":{"ephemeral_5m_input_tokens":300,"ephemeral_1h_input_tokens":600},"output_tokens":5}}`,
+			want: Usage{Model: "claude-opus-5-5", InputTokens: 910, CacheWriteTokens: 900,
+				CacheWrite1hTokens: 600, OutputTokens: 5},
+			wantOK: true,
+		},
+		{
 			name:        "error response",
 			contentType: "application/json",
 			body:        `{"error":{"message":"Incorrect API key provided","type":"invalid_request_error"}}`,

@@ -1,0 +1,10 @@
+# Binary
+/llmproxy
+
+# Usage databases
+*.db
+*.db-wal
+*.db-shm
+
+# Local secrets
+.env

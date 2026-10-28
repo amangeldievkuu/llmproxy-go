@@ -1,0 +1,4 @@
+{
+  "gpt-4o-mini": { "input": 0.15, "output": 0.60 },
+  "llama-3.3-70b": { "input": 0.59, "output": 0.79 }
+}

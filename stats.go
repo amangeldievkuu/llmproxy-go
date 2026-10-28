@@ -10,7 +10,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/amangeldievkuu/llmproxy/internal/store"
+	"github.com/amangeldievkuu/llmproxy-go/internal/store"
 )
 
 func runStats(args []string, out io.Writer) error {

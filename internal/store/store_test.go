@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,5 +67,28 @@ func TestSpentSinceAndSummary(t *testing.T) {
 func TestSummaryRejectsUnknownGrouping(t *testing.T) {
 	if _, err := openTest(t).Summary(context.Background(), time.Now(), "path; DROP TABLE requests"); err == nil {
 		t.Error("expected an error")
+	}
+}
+
+func TestOpenSetsPragmas(t *testing.T) {
+	s := openTest(t)
+	for pragma, want := range map[string]string{"journal_mode": "wal", "busy_timeout": "5000", "synchronous": "1"} {
+		var got string
+		if err := s.db.QueryRow("PRAGMA " + pragma).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("PRAGMA %s = %s, want %s", pragma, got, want)
+		}
+	}
+	var plan string
+	var id, parent, notused int
+	err := s.db.QueryRow(`EXPLAIN QUERY PLAN SELECT COALESCE(SUM(cost_usd), 0) FROM requests WHERE ts >= 0`).
+		Scan(&id, &parent, &notused, &plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan, "COVERING INDEX requests_ts_cost") {
+		t.Errorf("budget query does not use the covering index: %s", plan)
 	}
 }

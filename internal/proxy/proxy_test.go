@@ -14,7 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/amangeldievkuu/llmproxy/internal/store"
+	"github.com/amangeldievkuu/llmproxy-go/internal/store"
+	"github.com/amangeldievkuu/llmproxy-go/internal/usage"
 )
 
 const chatResponse = `{"model":"gpt-4o-mini-2024-07-18","usage":{"prompt_tokens":10,"completion_tokens":14}}`
@@ -197,5 +198,122 @@ func TestCache(t *testing.T) {
 	rows := waitRequests(t, st, "model", 3)
 	if len(rows) != 1 || rows[0].Requests != 3 || rows[0].Cached != 1 {
 		t.Errorf("unexpected summary %+v", rows)
+	}
+}
+
+func TestCacheHitServedOverBudget(t *testing.T) {
+	var calls atomic.Int32
+	proxyURL, st := setup(t, Config{CacheTTL: time.Minute, DailyBudget: 1}, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, chatResponse)
+	})
+	post(t, proxyURL+"/v1/chat/completions", nil)
+	waitRequests(t, st, "model", 1)
+	if err := st.Insert(context.Background(), store.Record{Time: time.Now(), CostUSD: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	if resp, _ := post(t, proxyURL+"/v1/chat/completions", nil); resp.StatusCode != http.StatusOK {
+		t.Errorf("cache hit over budget: got %d, want 200", resp.StatusCode)
+	}
+	req, _ := http.NewRequest(http.MethodPost, proxyURL+"/v1/chat/completions", strings.NewReader(`{"other":1}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests || calls.Load() != 1 {
+		t.Errorf("uncached request over budget: got %d after %d upstream calls", resp.StatusCode, calls.Load())
+	}
+}
+
+func TestCacheKeyedByProviderHeaders(t *testing.T) {
+	var calls atomic.Int32
+	proxyURL, _ := setup(t, Config{CacheTTL: time.Minute}, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, chatResponse)
+	})
+	for _, h := range []map[string]string{
+		{"Api-Key": "azure-alice"},
+		{"Api-Key": "azure-bob"},
+		{"Api-Key": "azure-bob", "Anthropic-Beta": "some-feature"},
+	} {
+		post(t, proxyURL+"/v1/chat/completions", h)
+	}
+	if calls.Load() != 3 {
+		t.Errorf("upstream called %d times, want 3", calls.Load())
+	}
+}
+
+func TestLargeRequestBypassesCache(t *testing.T) {
+	big := `{"model":"gpt-4o-mini","pad":"` + strings.Repeat("x", maxCachedRequest) + `"}`
+	var got atomic.Int64
+	proxyURL, _ := setup(t, Config{CacheTTL: time.Minute}, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got.Store(int64(len(b)))
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, chatResponse)
+	})
+	for range 2 {
+		resp, err := http.Post(proxyURL+"/v1/chat/completions", "application/json", strings.NewReader(big))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.Header.Get("X-Llmproxy-Cache") != "" || got.Load() != int64(len(big)) {
+			t.Fatalf("request body not forwarded intact (%d of %d bytes) or served from cache", got.Load(), len(big))
+		}
+	}
+}
+
+func TestRecordsUsageAfterLongStream(t *testing.T) {
+	proxyURL, st := setup(t, Config{}, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := "data: {\"choices\":[{\"delta\":{\"content\":\"" + strings.Repeat("x", 1<<20) + "\"}}]}\n\n"
+		for range 12 { // more than maxRecordedBody in total
+			io.WriteString(w, chunk)
+		}
+		io.WriteString(w, "data: {\"model\":\"gpt-4o-mini\",\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n")
+	})
+	resp, err := http.Post(proxyURL+"/v1/chat/completions", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	rows := waitRequests(t, st, "model", 1)
+	if len(rows) != 1 || rows[0].Key != "gpt-4o-mini" || rows[0].OutputTokens != 2 {
+		t.Errorf("usage at the end of a long stream was lost: %+v", rows)
+	}
+}
+
+func TestRecorderStopsAtLimit(t *testing.T) {
+	w := httptest.NewRecorder()
+	w.Header().Set("Content-Type", "application/json")
+	rec := &recorder{ResponseWriter: w, status: http.StatusOK}
+	rec.Write(make([]byte, maxRecordedBody))
+	rec.Write([]byte("x")) // over the limit
+	rec.Write([]byte(chatResponse))
+	if !rec.truncated || rec.body.Len() != 0 || rec.usage() != (usage.Usage{}) {
+		t.Errorf("truncated=%v kept=%d usage=%+v", rec.truncated, rec.body.Len(), rec.usage())
+	}
+}
+
+func TestCacheEvictsBySize(t *testing.T) {
+	c := newCache(time.Minute, 10, 100)
+	c.set("a", entry{body: make([]byte, 60)})
+	c.set("b", entry{body: make([]byte, 60)})
+	if _, ok := c.get("b"); !ok {
+		t.Error("newest entry missing")
+	}
+	if _, ok := c.get("a"); ok || c.size != 60 {
+		t.Errorf("cache over its byte limit: size %d", c.size)
+	}
+	c.set("big", entry{body: make([]byte, 101)})
+	if _, ok := c.get("big"); ok {
+		t.Error("entry larger than the cache was stored")
 	}
 }

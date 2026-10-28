@@ -1,6 +1,9 @@
 package usage
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParse(t *testing.T) {
 	tests := []struct {
@@ -64,6 +67,32 @@ func TestParse(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			name:        "openai cached prompt tokens",
+			contentType: "application/json",
+			body: `{"model":"gpt-5","usage":{"prompt_tokens":1000,"completion_tokens":5,
+				"prompt_tokens_details":{"cached_tokens":800}}}`,
+			want:   Usage{Model: "gpt-5", InputTokens: 1000, CacheReadTokens: 800, OutputTokens: 5},
+			wantOK: true,
+		},
+		{
+			name:        "openai responses cached input tokens",
+			contentType: "application/json",
+			body: `{"model":"gpt-5","usage":{"input_tokens":1000,"output_tokens":5,
+				"input_tokens_details":{"cached_tokens":600}}}`,
+			want:   Usage{Model: "gpt-5", InputTokens: 1000, CacheReadTokens: 600, OutputTokens: 5},
+			wantOK: true,
+		},
+		{
+			name:        "anthropic stream with prompt cache",
+			contentType: "text/event-stream",
+			body: "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-opus-5-5\",\"usage\":" +
+				"{\"input_tokens\":20,\"cache_read_input_tokens\":5000,\"cache_creation_input_tokens\":300,\"output_tokens\":1}}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":40}}\n\n",
+			want: Usage{Model: "claude-opus-5-5", InputTokens: 5320, CacheReadTokens: 5000,
+				CacheWriteTokens: 300, OutputTokens: 40},
+			wantOK: true,
+		},
+		{
 			name:        "error response",
 			contentType: "application/json",
 			body:        `{"error":{"message":"Incorrect API key provided","type":"invalid_request_error"}}`,
@@ -82,5 +111,29 @@ func TestParse(t *testing.T) {
 				t.Errorf("Parse() = %+v, %v; want %+v, %v", got, ok, tt.want, tt.wantOK)
 			}
 		})
+	}
+}
+
+func TestStreamSplitWrites(t *testing.T) {
+	body := "event: message_start\r\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\r\n\r\n" +
+		"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":15}}"
+	var s Stream
+	for i := 0; i < len(body); i += 7 { // events arrive split at arbitrary points
+		s.Write([]byte(body[i:min(i+7, len(body))]))
+	}
+	want := Usage{Model: "claude-opus-5-5", InputTokens: 25, OutputTokens: 15}
+	if got := s.Usage(); got != want {
+		t.Errorf("Usage() = %+v, want %+v", got, want)
+	}
+}
+
+func TestStreamSkipsOverlongLines(t *testing.T) {
+	var s Stream
+	s.Write([]byte("data: {\"model\":\"" + strings.Repeat("x", maxLine) + "\"}\n"))
+	s.Write([]byte("data: {\"model\":\"gpt-5\",\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n"))
+	want := Usage{Model: "gpt-5", InputTokens: 3, OutputTokens: 2}
+	if got := s.Usage(); got != want {
+		t.Errorf("Usage() = %+v, want %+v", got, want)
 	}
 }

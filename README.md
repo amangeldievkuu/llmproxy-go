@@ -34,26 +34,29 @@ TOTAL     42        12      5940   5920    $0.014595
 - **Cost tracking**: built-in price table, overridable with a JSON file.
 - **Tags**: add an `X-Llmproxy-Tag` header to see spend per feature, user or environment.
 - **Daily budget**: requests get `429` once the day's spend reaches your limit.
+- **Prompt-cache aware**: OpenAI cached input and Anthropic cache reads and writes are priced at their own rates.
 - **Response cache**: identical requests (same API key, URL and body) can be answered from memory.
 - **One static binary**: pure Go, no cgo, no Docker, no external database.
 
 ## Install
 
 ```sh
-go install github.com/amangeldievkuu/llmproxy@latest
+go install github.com/amangeldievkuu/llmproxy-go@latest
 ```
 
-Or build from source:
+`go install` names the binary `llmproxy-go`. The examples below call it `llmproxy`, so rename it or add an alias (`alias llmproxy=llmproxy-go`). Prebuilt binaries and builds from source are already named `llmproxy`.
+
+Or download a prebuilt binary from the [releases page](https://github.com/amangeldievkuu/llmproxy-go/releases), or build from source:
 
 ```sh
-git clone https://github.com/amangeldievkuu/llmproxy
-cd llmproxy
-go build
+git clone https://github.com/amangeldievkuu/llmproxy-go
+cd llmproxy-go
+go build -o llmproxy
 ```
 
 ## Quick start
 
-Start the proxy (it forwards to OpenAI by default):
+Start the proxy (it forwards to OpenAI by default and listens on `127.0.0.1:8000`):
 
 ```sh
 llmproxy serve
@@ -135,7 +138,9 @@ client.chat.completions.create(
 llmproxy serve -daily-budget 5
 ```
 
-Once today's recorded spend reaches $5, requests get `429` with an error body in the usual `{"error": {...}}` shape until midnight (local time).
+Once today's recorded spend reaches $5, requests get `429` with an error body in the usual `{"error": {...}}` shape until midnight (local time). Cache hits are still served, since they cost nothing.
+
+The budget is a soft limit: a request's cost is only known once it finishes, so requests already in flight when the limit is reached still complete, and requests for models with no known price count as `$0`. Proxies that share a database file share the budget.
 
 ## Response cache
 
@@ -143,18 +148,22 @@ Once today's recorded spend reaches $5, requests get `429` with an error body in
 llmproxy serve -cache-ttl 10m
 ```
 
-Identical `POST` requests (same API key, URL and body) are answered from memory for 10 minutes and marked `X-Llmproxy-Cache: hit`. Cached responses are recorded at zero cost. The cache is useful in development and tests; leave it off when you want fresh model output for every call.
+Identical `POST` requests (same API key, URL, body and API version headers) are answered from memory for 10 minutes and marked `X-Llmproxy-Cache: hit`. Cached responses are recorded at zero cost. Requests over 4 MB and responses over 2 MB are not cached, and the cache holds at most 256 MB. The cache is useful in development and tests; leave it off when you want fresh model output for every call.
 
 ## Prices
 
-Built-in prices cover current OpenAI and Anthropic models and are matched by the longest model-name prefix (`gpt-4o-mini-2024-07-18` → `gpt-4o-mini`). Providers change prices, so you can override or add models with a JSON file of USD per million tokens:
+Built-in prices cover current OpenAI and Anthropic models, including prompt-cache and long-context rates. A price name matches a model exactly or followed by a date or version number (`gpt-4o-mini` matches `gpt-4o-mini-2024-07-18`, `claude-sonnet-4` matches `claude-sonnet-4-5-20250929`), and the longest match wins. Other suffixes don't match, so a pricier variant such as `o3-pro` or `gpt-5.5` is never billed at the `o3` or `gpt-5` price. A name ending in `*` matches any suffix.
+
+Providers change prices, so you can override or add models with a JSON file of USD per million tokens:
 
 ```json
 {
-  "gpt-4o-mini": { "input": 0.15, "output": 0.60 },
-  "llama-3.3-70b": { "input": 0.59, "output": 0.79 }
+  "gpt-4o-mini": { "input": 0.15, "output": 0.60, "cache_read": 0.075 },
+  "llama-3.3-70b*": { "input": 0.59, "output": 0.79 }
 }
 ```
+
+`input` and `output` are required. `cache_read` and `cache_write` default to the input price. `long_context_tokens` and `long_context` (a nested price) set higher rates for requests with more input tokens than that.
 
 ```sh
 llmproxy serve -prices prices.json
@@ -168,20 +177,21 @@ Requests for a model with no price are still recorded, with cost `0`, and logged
 
 | Flag | Env | Default | Description |
 | --- | --- | --- | --- |
-| `-port` | `PORT` | `8000` | Port to listen on |
+| `-host` | `LLMPROXY_HOST` | `127.0.0.1` | Address to listen on. `0.0.0.0` exposes the proxy to your network |
+| `-port` | `LLMPROXY_PORT` | `8000` | Port to listen on |
 | `-upstream` | `LLMPROXY_UPSTREAM` | `https://api.openai.com` | API to forward requests to |
 | `-db` | `LLMPROXY_DB` | `llmproxy.db` | SQLite file for usage records |
 | `-daily-budget` | | `0` (off) | USD per day before requests get 429 |
 | `-cache-ttl` | | `0` (off) | How long to cache identical requests, e.g. `10m` |
 | `-prices` | | | JSON file with extra or overriding prices |
 
-`llmproxy stats` flags: `-db` (same as above) and `-since` (default `24h`).
+`llmproxy stats` flags: `-db` (same as above) and `-since` (default `24h`). `llmproxy version` prints the version.
 
 If a `.env` file exists in the current directory, its `KEY=VALUE` lines are loaded at startup. Variables already set in your shell take precedence, and flags override both.
 
 ```sh
 # .env
-PORT=9000
+LLMPROXY_PORT=9000
 LLMPROXY_UPSTREAM=https://api.anthropic.com
 ```
 
@@ -193,11 +203,11 @@ sqlite3 llmproxy.db "SELECT model, SUM(cost_usd) FROM requests GROUP BY model"
 
 ## Known limitations
 
-- **Prompt-cache discounts are not applied.** Costs use the standard input and output prices. OpenAI cached input tokens and Anthropic cache reads and writes are billed differently, so recorded costs can be slightly off for apps that rely on prompt caching.
+- **Costs are estimates.** Anthropic 1-hour cache writes are priced as 5-minute writes, and batch, priority and regional pricing are not modelled. Check your provider's invoice for exact figures.
 - **OpenAI streaming needs `stream_options`.** OpenAI only reports usage in a Chat Completions stream when the request sets `"stream_options": {"include_usage": true}`. Without it, streamed requests are recorded with zero tokens. Anthropic streams and the OpenAI Responses API always include usage.
 - **One upstream per process.** Run one proxy per provider.
 - **The response cache is in memory** and is cleared on restart.
-- **No authentication.** The proxy forwards whatever key the client sends. Run it on localhost or a private network.
+- **No authentication.** The proxy forwards whatever key the client sends. It listens on localhost by default; only change `-host` on a network you trust.
 
 ## Development
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, keeps the binary cgo-free
@@ -25,8 +26,14 @@ CREATE TABLE IF NOT EXISTS requests (
 	latency_ms    INTEGER NOT NULL,
 	cached        INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS requests_ts ON requests (ts);
+-- Covers the daily budget check, which runs on every request.
+CREATE INDEX IF NOT EXISTS requests_ts_cost ON requests (ts, cost_usd);
+DROP INDEX IF EXISTS requests_ts;
 `
+
+// pragmas are set in the DSN so that every connection the pool opens gets them.
+// synchronous=NORMAL is safe in WAL mode and avoids an fsync per insert.
+const pragmas = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 
 // Record is one proxied request.
 type Record struct {
@@ -60,18 +67,19 @@ type Store struct {
 
 // Open opens the database at path, creating it if needed.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	if strings.Contains(path, "?") {
+		return nil, fmt.Errorf("open %s: database path must not contain '?'", path)
+	}
+	db, err := sql.Open("sqlite", path+"?"+pragmas)
 	if err != nil {
 		return nil, err
 	}
 	// SQLite allows one writer at a time; a single connection avoids "database is locked".
 	db.SetMaxOpenConns(1)
 
-	for _, stmt := range []string{"PRAGMA journal_mode = WAL", "PRAGMA busy_timeout = 5000", schema} {
-		if _, err := db.Exec(stmt); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("open %s: %w", path, err)
-		}
+	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	return &Store{db: db}, nil
 }

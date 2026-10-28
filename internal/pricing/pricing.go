@@ -18,6 +18,8 @@ type Price struct {
 	Output     float64 `json:"output"`
 	CacheRead  float64 `json:"cache_read,omitempty"`  // cached input; 0 means the Input price
 	CacheWrite float64 `json:"cache_write,omitempty"` // input written to the cache; 0 means the Input price
+	// CacheWrite1h is input written to Anthropic's 1-hour cache; 0 means the CacheWrite price.
+	CacheWrite1h float64 `json:"cache_write_1h,omitempty"`
 
 	// Requests with more than LongContextTokens input tokens are billed at
 	// LongContext instead.
@@ -31,9 +33,11 @@ func (p Price) Cost(u usage.Usage) float64 {
 		p = *p.LongContext
 	}
 	uncached := max(0, u.InputTokens-u.CacheReadTokens-u.CacheWriteTokens)
+	write5m := max(0, u.CacheWriteTokens-u.CacheWrite1hTokens)
 	return (float64(uncached)*p.Input +
 		float64(u.CacheReadTokens)*cmp.Or(p.CacheRead, p.Input) +
-		float64(u.CacheWriteTokens)*cmp.Or(p.CacheWrite, p.Input) +
+		float64(write5m)*cmp.Or(p.CacheWrite, p.Input) +
+		float64(u.CacheWriteTokens-write5m)*cmp.Or(p.CacheWrite1h, p.CacheWrite, p.Input) +
 		float64(u.OutputTokens)*p.Output) / 1_000_000
 }
 
@@ -41,9 +45,8 @@ func (p Price) Cost(u usage.Usage) float64 {
 type Table map[string]Price
 
 // defaults are list prices for standard (non-batch) usage, last checked
-// 2026-10-28 against the OpenAI and Anthropic pricing pages. Anthropic cache
-// writes use the 5-minute cache price. Providers change prices: override them
-// with Load.
+// 2026-10-28 against the OpenAI and Anthropic pricing pages. Providers change
+// prices: override them with Load.
 var defaults = Table{
 	// OpenAI
 	"gpt-6-astra":   {Input: 10.00, Output: 50.00, CacheRead: 1.00, LongContextTokens: 272_000, LongContext: &Price{Input: 20.00, Output: 75.00, CacheRead: 2.00}},
@@ -78,22 +81,22 @@ var defaults = Table{
 	"o4-mini":       {Input: 1.10, Output: 4.40, CacheRead: 0.275},
 
 	// Anthropic
-	"claude-fable-5-1":  {Input: 10.00, Output: 50.00, CacheRead: 0.25, CacheWrite: 12.50},
-	"claude-fable-5":    {Input: 10.00, Output: 50.00, CacheRead: 1.00, CacheWrite: 12.50},
-	"claude-mythos-5-1": {Input: 10.00, Output: 50.00, CacheRead: 0.25, CacheWrite: 12.50},
-	"claude-mythos-5":   {Input: 10.00, Output: 50.00, CacheRead: 1.00, CacheWrite: 12.50},
-	"claude-opus-5-5":   {Input: 4.00, Output: 20.00, CacheRead: 0.20, CacheWrite: 5.00},
-	"claude-opus-5":     {Input: 5.00, Output: 25.00, CacheRead: 0.50, CacheWrite: 6.25},
-	"claude-opus-4-8":   {Input: 5.00, Output: 25.00, CacheRead: 0.50, CacheWrite: 6.25},
-	"claude-opus-4-7":   {Input: 5.00, Output: 25.00, CacheRead: 0.50, CacheWrite: 6.25},
-	"claude-opus-4-6":   {Input: 5.00, Output: 25.00, CacheRead: 0.50, CacheWrite: 6.25},
-	"claude-opus-4-5":   {Input: 5.00, Output: 25.00, CacheRead: 0.50, CacheWrite: 6.25},
-	"claude-opus-4":     {Input: 15.00, Output: 75.00, CacheRead: 1.50, CacheWrite: 18.75}, // also Opus 4.1
-	"claude-sonnet-5-5": {Input: 2.00, Output: 10.00, CacheRead: 0.10, CacheWrite: 2.50},
-	"claude-sonnet-5":   {Input: 2.00, Output: 10.00, CacheRead: 0.20, CacheWrite: 2.50},
-	"claude-sonnet-4":   {Input: 3.00, Output: 15.00, CacheRead: 0.30, CacheWrite: 3.75}, // also 4.5 and 4.6
-	"claude-haiku-5-5":  {Input: 0.10, Output: 0.50, CacheRead: 0.01, CacheWrite: 0.125, LongContextTokens: 100_000, LongContext: &Price{Input: 0.50, Output: 2.50, CacheRead: 0.05, CacheWrite: 0.625}},
-	"claude-haiku-4-5":  {Input: 1.00, Output: 5.00, CacheRead: 0.10, CacheWrite: 1.25},
+	"claude-fable-5-1":  {Input: 10.00, Output: 50.00, CacheRead: 0.25, CacheWrite: 12.50, CacheWrite1h: 20.00},
+	"claude-fable-5":    {Input: 10.00, Output: 50.00, CacheRead: 1.00, CacheWrite: 12.50, CacheWrite1h: 20.00},
+	"claude-mythos-5-1": {Input: 10.00, Output: 50.00, CacheRead: 0.25, CacheWrite: 12.50, CacheWrite1h: 20.00},
+	"claude-mythos-5":   {Input: 10.00, Output: 50.00, CacheRead: 1.00, CacheWrite: 12.50, CacheWrite1h: 20.00},
+	"claude-opus-5-5":   {Input: 4.00, Output: 20.00, CacheRead: 0.20, CacheWrite: 5.00, CacheWrite1h: 8.00},
+	"claude-opus-5":     {Input: 5.00, Output: 25.00, CacheRead: 0.50, CacheWrite: 6.25, CacheWrite1h: 10.00},
+	"claude-opus-4-8":   {Input: 5.00, Output: 25.00, CacheRead: 0.50, CacheWrite: 6.25, CacheWrite1h: 10.00},
+	"claude-opus-4-7":   {Input: 5.00, Output: 25.00, CacheRead: 0.50, CacheWrite: 6.25, CacheWrite1h: 10.00},
+	"claude-opus-4-6":   {Input: 5.00, Output: 25.00, CacheRead: 0.50, CacheWrite: 6.25, CacheWrite1h: 10.00},
+	"claude-opus-4-5":   {Input: 5.00, Output: 25.00, CacheRead: 0.50, CacheWrite: 6.25, CacheWrite1h: 10.00},
+	"claude-opus-4":     {Input: 15.00, Output: 75.00, CacheRead: 1.50, CacheWrite: 18.75, CacheWrite1h: 30.00}, // also Opus 4.1
+	"claude-sonnet-5-5": {Input: 2.00, Output: 10.00, CacheRead: 0.10, CacheWrite: 2.50, CacheWrite1h: 4.00},
+	"claude-sonnet-5":   {Input: 2.00, Output: 10.00, CacheRead: 0.20, CacheWrite: 2.50, CacheWrite1h: 4.00},
+	"claude-sonnet-4":   {Input: 3.00, Output: 15.00, CacheRead: 0.30, CacheWrite: 3.75, CacheWrite1h: 6.00}, // also 4.5 and 4.6
+	"claude-haiku-5-5":  {Input: 0.10, Output: 0.50, CacheRead: 0.01, CacheWrite: 0.125, CacheWrite1h: 0.20, LongContextTokens: 100_000, LongContext: &Price{Input: 0.50, Output: 2.50, CacheRead: 0.05, CacheWrite: 0.625, CacheWrite1h: 1.00}},
+	"claude-haiku-4-5":  {Input: 1.00, Output: 5.00, CacheRead: 0.10, CacheWrite: 1.25, CacheWrite1h: 2.00},
 }
 
 // Default returns a copy of the built-in price table.
@@ -118,7 +121,7 @@ func Load(path string) (Table, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	for name, p := range extra {
-		if p.Input < 0 || p.Output < 0 || p.CacheRead < 0 || p.CacheWrite < 0 {
+		if p.Input < 0 || p.Output < 0 || p.CacheRead < 0 || p.CacheWrite < 0 || p.CacheWrite1h < 0 {
 			return nil, fmt.Errorf("%s: negative price for %q", path, name)
 		}
 	}

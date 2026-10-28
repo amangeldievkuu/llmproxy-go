@@ -17,7 +17,10 @@ type Usage struct {
 	InputTokens      int
 	CacheReadTokens  int // input tokens read from the provider's prompt cache
 	CacheWriteTokens int // input tokens written to the provider's prompt cache
-	OutputTokens     int
+	// CacheWrite1hTokens is the part of CacheWriteTokens written to Anthropic's
+	// 1-hour cache, which costs more than the default 5-minute cache.
+	CacheWrite1hTokens int
+	OutputTokens       int
 }
 
 // Parse reads the usage from a response body. It reports false when the body
@@ -44,6 +47,7 @@ type Stream struct {
 	openaiCached  int // part of input
 	cacheRead     int // Anthropic: not part of input
 	cacheWrite    int // Anthropic: not part of input
+	cacheWrite1h  int // Anthropic: part of cacheWrite
 
 	line    []byte // the current, unfinished line
 	skipped bool   // the current line grew past maxLine
@@ -88,11 +92,12 @@ func (s *Stream) Usage() Usage {
 		s.endLine()
 	}
 	return Usage{
-		Model:            s.model,
-		InputTokens:      s.input + s.cacheRead + s.cacheWrite,
-		CacheReadTokens:  s.openaiCached + s.cacheRead,
-		CacheWriteTokens: s.cacheWrite,
-		OutputTokens:     s.output,
+		Model:              s.model,
+		InputTokens:        s.input + s.cacheRead + s.cacheWrite,
+		CacheReadTokens:    s.openaiCached + s.cacheRead,
+		CacheWriteTokens:   s.cacheWrite,
+		CacheWrite1hTokens: s.cacheWrite1h,
+		OutputTokens:       s.output,
 	}
 }
 
@@ -113,6 +118,9 @@ type tokens struct {
 	InputTokensDetails       *details `json:"input_tokens_details"`
 	CacheReadInputTokens     int      `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int      `json:"cache_creation_input_tokens"`
+	CacheCreation            *struct {
+		Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation"`
 }
 
 type message struct {
@@ -153,6 +161,9 @@ func (s *Stream) add(data []byte) {
 			}
 			s.cacheRead = max(s.cacheRead, t.CacheReadInputTokens)
 			s.cacheWrite = max(s.cacheWrite, t.CacheCreationInputTokens)
+			if c := t.CacheCreation; c != nil {
+				s.cacheWrite1h = max(s.cacheWrite1h, c.Ephemeral1hInputTokens)
+			}
 		}
 	}
 }

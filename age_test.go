@@ -32,3 +32,26 @@ func TestAgeString(t *testing.T) {
 		t.Errorf("String() = %q, want 36h0m0s", got)
 	}
 }
+
+func TestMoment(t *testing.T) {
+	now := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
+	for s, want := range map[string]time.Time{
+		"2026-09-01": time.Date(2026, 9, 1, 0, 0, 0, 0, time.Local),
+		"7d":         now.Add(-7 * 24 * time.Hour),
+		"90m":        now.Add(-90 * time.Minute),
+	} {
+		var m moment
+		if err := m.Set(s); err != nil || !m.at(now).Equal(want) {
+			t.Errorf("moment %q = %v, %v; want %v", s, m.at(now), err, want)
+		}
+	}
+	for _, s := range []string{"2026-13-01", "2026/09/01", "soon"} {
+		var m moment
+		if err := m.Set(s); err == nil {
+			t.Errorf("moment %q: expected an error", s)
+		}
+	}
+	if got := (moment{}).at(now); !got.Equal(now) {
+		t.Errorf("unset moment = %v, want now", got)
+	}
+}

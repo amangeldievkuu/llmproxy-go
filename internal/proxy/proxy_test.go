@@ -62,7 +62,7 @@ func waitRequests(t *testing.T, st *store.Store, by string, n int) []store.Row {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		rows, err := st.Summary(context.Background(), time.Now().Add(-time.Hour), by)
+		rows, err := st.Summary(context.Background(), time.Now().Add(-time.Hour), time.Time{}, by)
 		if err != nil {
 			t.Fatal(err)
 		}

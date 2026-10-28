@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ func TestSpentSinceAndSummary(t *testing.T) {
 		t.Errorf("SpentSince() = %v, want 0.51", spent)
 	}
 
-	rows, err := s.Summary(ctx, since, "model")
+	rows, err := s.Summary(ctx, since, time.Time{}, "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +66,7 @@ func TestSpentSinceAndSummary(t *testing.T) {
 }
 
 func TestSummaryRejectsUnknownGrouping(t *testing.T) {
-	if _, err := openTest(t).Summary(context.Background(), time.Now(), "path; DROP TABLE requests"); err == nil {
+	if _, err := openTest(t).Summary(context.Background(), time.Now(), time.Time{}, "path; DROP TABLE requests"); err == nil {
 		t.Error("expected an error")
 	}
 }
@@ -118,5 +119,41 @@ func TestPrune(t *testing.T) {
 	}
 	if n, _ := s.Prune(ctx, cutoff); n != 0 {
 		t.Errorf("second Prune() deleted %d", n)
+	}
+}
+
+func TestSummaryRangeAndDays(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	// India is UTC+5:30, so its midnight falls in the middle of a UTC hour.
+	india := time.FixedZone("IST", 5*3600+1800)
+	midnight := time.Date(2026, 10, 2, 0, 0, 0, 0, india)
+	for _, r := range []Record{
+		{Time: midnight.Add(-24 * time.Hour), Model: "a", CostUSD: 1}, // Oct 1, 00:00
+		{Time: midnight.Add(-time.Minute), Model: "a", CostUSD: 2},    // Oct 1, 23:59
+		{Time: midnight, Model: "b", CostUSD: 4},                      // Oct 2, 00:00
+		{Time: midnight.Add(24 * time.Hour), Model: "b", CostUSD: 8},  // Oct 3, excluded by to
+	} {
+		if err := s.Insert(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	from, to := midnight.Add(-24*time.Hour), midnight.Add(24*time.Hour)
+
+	days, err := s.Summary(ctx, from, to, "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Row{{Key: "2026-10-01", Requests: 2, CostUSD: 3}, {Key: "2026-10-02", Requests: 1, CostUSD: 4}}
+	if !slices.Equal(days, want) {
+		t.Errorf("days = %+v, want %+v", days, want)
+	}
+
+	models, err := s.Summary(ctx, from, to, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models[0].Key != "b" || models[0].CostUSD != 4 {
+		t.Errorf("models = %+v, want b ($4, the Oct 3 record excluded) first", models)
 	}
 }

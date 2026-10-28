@@ -29,7 +29,7 @@ TOTAL     42        12      5940   5920    $0.014595
 ## Features
 
 - **Drop-in**: point your SDK's base URL at the proxy. API keys pass straight through and are never stored.
-- **Streaming-safe**: server-sent events are forwarded as they arrive, and usage is read from the stream.
+- **Streaming-safe**: server-sent events are forwarded as they arrive, and usage is read from the stream, including OpenAI streams that don't ask for it (see [Streaming](#streaming)).
 - **OpenAI and Anthropic**: Chat Completions, Responses and Messages APIs, JSON and streaming.
 - **Cost tracking**: built-in price table, overridable with a JSON file.
 - **Tags**: add an `X-Llmproxy-Tag` header to see spend per feature, user or environment.
@@ -150,6 +150,12 @@ llmproxy serve -cache-ttl 10m
 
 Identical `POST` requests (same API key, URL, body and API version headers) are answered from memory for 10 minutes and marked `X-Llmproxy-Cache: hit`. Cached responses are recorded at zero cost. Requests over 4 MB and responses over 2 MB are not cached, and the cache holds at most 256 MB. The cache is useful in development and tests; leave it off when you want fresh model output for every call.
 
+## Streaming
+
+OpenAI only reports token usage in a Chat Completions stream when the request sets `"stream_options": {"include_usage": true}`. When a streamed request doesn't set it, the proxy adds it, reads the usage from the extra final chunk OpenAI then sends, and removes that chunk, so your app receives the same stream it asked for. If your app sets `include_usage` itself, to `true` or `false`, the request is left as it is. Anthropic streams and the OpenAI Responses API always include usage.
+
+Some older OpenAI-compatible servers reject `stream_options` with a `400` error. Turn the feature off for them with `-stream-usage=false`; their streamed requests are then recorded with zero tokens.
+
 ## Prices
 
 Built-in prices cover current OpenAI and Anthropic models, including prompt-cache and long-context rates. A price name matches a model exactly or followed by a date or version number (`gpt-4o-mini` matches `gpt-4o-mini-2024-07-18`, `claude-sonnet-4` matches `claude-sonnet-4-5-20250929`), and the longest match wins. Other suffixes don't match, so a pricier variant such as `o3-pro` or `gpt-5.5` is never billed at the `o3` or `gpt-5` price. A name ending in `*` matches any suffix.
@@ -184,6 +190,7 @@ Requests for a model with no price are still recorded, with cost `0`, and logged
 | `-daily-budget` | | `0` (off) | USD per day before requests get 429 |
 | `-cache-ttl` | | `0` (off) | How long to cache identical requests, e.g. `10m` |
 | `-prices` | | | JSON file with extra or overriding prices |
+| `-stream-usage` | | `true` | Ask for token usage in streamed OpenAI Chat Completions requests |
 
 `llmproxy stats` flags: `-db` (same as above) and `-since` (default `24h`). `llmproxy version` prints the version.
 
@@ -204,7 +211,6 @@ sqlite3 llmproxy.db "SELECT model, SUM(cost_usd) FROM requests GROUP BY model"
 ## Known limitations
 
 - **Costs are estimates.** Anthropic 1-hour cache writes are priced as 5-minute writes, and batch, priority and regional pricing are not modelled. Check your provider's invoice for exact figures.
-- **OpenAI streaming needs `stream_options`.** OpenAI only reports usage in a Chat Completions stream when the request sets `"stream_options": {"include_usage": true}`. Without it, streamed requests are recorded with zero tokens. Anthropic streams and the OpenAI Responses API always include usage.
 - **One upstream per process.** Run one proxy per provider.
 - **The response cache is in memory** and is cleared on restart.
 - **No authentication.** The proxy forwards whatever key the client sends. It listens on localhost by default; only change `-host` on a network you trust.

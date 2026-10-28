@@ -248,7 +248,7 @@ func TestCacheKeyedByProviderHeaders(t *testing.T) {
 }
 
 func TestLargeRequestBypassesCache(t *testing.T) {
-	big := `{"model":"gpt-4o-mini","pad":"` + strings.Repeat("x", maxCachedRequest) + `"}`
+	big := `{"model":"gpt-4o-mini","pad":"` + strings.Repeat("x", maxReadBody) + `"}`
 	var got atomic.Int64
 	proxyURL, _ := setup(t, Config{CacheTTL: time.Minute}, func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -315,5 +315,111 @@ func TestCacheEvictsBySize(t *testing.T) {
 	c.set("big", entry{body: make([]byte, 101)})
 	if _, ok := c.get("big"); ok {
 		t.Error("entry larger than the cache was stored")
+	}
+}
+
+const (
+	contentChunk = "data: {\"model\":\"gpt-4o-mini\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}],\"usage\":null}\n\n"
+	usageChunk   = "data: {\"model\":\"gpt-4o-mini\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n"
+	doneChunk    = "data: [DONE]\n\n"
+)
+
+// fakeChat answers like OpenAI Chat Completions: it streams when asked, and
+// adds a usage chunk only when the request sets include_usage. It sends each
+// request body it receives on bodies.
+func fakeChat(bodies chan<- string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies <- string(b)
+		if !strings.Contains(string(b), `"stream":true`) {
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, chatResponse)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, contentChunk)
+		if strings.Contains(string(b), `"include_usage":true`) {
+			io.WriteString(w, usageChunk)
+		}
+		io.WriteString(w, doneChunk)
+	}
+}
+
+func postBody(t *testing.T, rawURL, body string) string {
+	t.Helper()
+	resp, err := http.Post(rawURL, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return string(b)
+}
+
+func TestStreamUsageAdded(t *testing.T) {
+	bodies := make(chan string, 1)
+	proxyURL, st := setup(t, Config{StreamUsage: true}, fakeChat(bodies))
+
+	got := postBody(t, proxyURL+"/v1/chat/completions",
+		`{"model":"gpt-4o-mini","stream":true,"stream_options":{"other":1},"messages":[{"role":"user","content":"<b>&</b>"}]}`)
+	sent := <-bodies
+	for _, want := range []string{`"include_usage":true`, `"other":1`, `"content":"<b>&</b>"`} {
+		if !strings.Contains(sent, want) {
+			t.Errorf("upstream request %s is missing %s", sent, want)
+		}
+	}
+	if got != contentChunk+doneChunk {
+		t.Errorf("client got %q, want the stream without the usage chunk", got)
+	}
+
+	rows := waitRequests(t, st, "model", 1)
+	if len(rows) != 1 || rows[0].InputTokens != 3 || rows[0].OutputTokens != 2 || rows[0].CostUSD <= 0 {
+		t.Errorf("stream usage not recorded: %+v", rows)
+	}
+}
+
+func TestStreamUsageLeftAlone(t *testing.T) {
+	tests := []struct {
+		name, path, body string
+		streamUsage      bool
+		wantUsageChunk   bool
+	}{
+		{"app asks for usage", "/v1/chat/completions",
+			`{"stream":true,"stream_options":{"include_usage":true}}`, true, true},
+		{"app declines usage", "/v1/chat/completions",
+			`{"stream":true,"stream_options":{"include_usage":false}}`, true, false},
+		{"not streamed", "/v1/chat/completions", `{"stream":false}`, true, false},
+		{"other endpoint", "/v1/messages", `{"stream":true}`, true, false},
+		{"turned off", "/v1/chat/completions", `{"stream":true}`, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bodies := make(chan string, 1)
+			proxyURL, _ := setup(t, Config{StreamUsage: tt.streamUsage}, fakeChat(bodies))
+			got := postBody(t, proxyURL+tt.path, tt.body)
+			if sent := <-bodies; sent != tt.body {
+				t.Errorf("request body changed: %s", sent)
+			}
+			if strings.Contains(got, usageChunk) != tt.wantUsageChunk {
+				t.Errorf("client got %q", got)
+			}
+		})
+	}
+}
+
+func TestEventFilter(t *testing.T) {
+	crlf := strings.ReplaceAll(usageChunk, "\n", "\r\n")
+	stream := contentChunk + crlf + "event: ping\ndata: {}\n\n" + usageChunk + doneChunk + "data: {\"unfinished\""
+	var out strings.Builder
+	f := &eventFilter{send: func(b []byte) (int, error) { return out.Write(b) }}
+	for i := 0; i < len(stream); i += 5 { // events arrive split at arbitrary points
+		if err := f.Write([]byte(stream[i:min(i+5, len(stream))])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.flush()
+	want := contentChunk + "event: ping\ndata: {}\n\n" + doneChunk + "data: {\"unfinished\""
+	if out.String() != want {
+		t.Errorf("got %q\nwant %q", out.String(), want)
 	}
 }

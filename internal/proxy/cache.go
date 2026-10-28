@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -16,7 +15,6 @@ const (
 	maxCacheEntries   = 1000
 	maxCacheBytes     = 256 << 20 // total size of cached bodies
 	maxCacheEntrySize = 2 << 20   // larger responses are not cached
-	maxCachedRequest  = 4 << 20   // larger requests bypass the cache
 )
 
 // keyHeaders are the request headers that are part of the cache key: the
@@ -120,25 +118,8 @@ func (c *cache) evict(n int) {
 	}
 }
 
-// cacheKey hashes the key headers, URL and body of r, then restores r.Body so
-// the request can still be sent upstream. It reports false, leaving r able to
-// be forwarded, when the body is too large to cache.
-func cacheKey(r *http.Request) (string, bool, error) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxCachedRequest+1))
-	if err != nil {
-		r.Body.Close()
-		return "", false, err
-	}
-	if len(body) > maxCachedRequest {
-		r.Body = struct {
-			io.Reader
-			io.Closer
-		}{io.MultiReader(bytes.NewReader(body), r.Body), r.Body}
-		return "", false, nil
-	}
-	r.Body.Close()
-	r.Body = io.NopCloser(bytes.NewReader(body))
-
+// cacheKey hashes the key headers, URL and body of r.
+func cacheKey(r *http.Request, body []byte) string {
 	h := sha256.New()
 	for _, name := range keyHeaders {
 		io.WriteString(h, strings.Join(r.Header.Values(name), "\x00"))
@@ -149,5 +130,5 @@ func cacheKey(r *http.Request) (string, bool, error) {
 	io.WriteString(h, r.URL.RequestURI())
 	h.Write([]byte{0})
 	h.Write(body)
-	return hex.EncodeToString(h.Sum(nil)), true, nil
+	return hex.EncodeToString(h.Sum(nil))
 }

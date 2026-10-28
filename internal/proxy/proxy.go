@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -31,6 +32,7 @@ type Config struct {
 	Prices      pricing.Table // nil uses pricing.Default()
 	DailyBudget float64       // USD per calendar day before requests get 429; 0 disables
 	CacheTTL    time.Duration // how long identical requests are served from memory; 0 disables
+	StreamUsage bool          // add stream_options.include_usage to streamed Chat Completions requests
 	Logger      *log.Logger   // nil uses log.Default()
 }
 
@@ -82,21 +84,30 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tag := r.Header.Get(TagHeader)
 	r.Header.Del(TagHeader)
 
-	// Cache hits cost nothing, so they are served even over budget.
 	var key string
-	if p.cache != nil && r.Method == http.MethodPost {
-		k, ok, err := cacheKey(r)
+	var addedUsage bool
+	addUsage := p.cfg.StreamUsage && strings.HasSuffix(r.URL.Path, "/chat/completions")
+	if r.Method == http.MethodPost && (p.cache != nil || addUsage) {
+		body, ok, err := readBody(r, maxReadBody)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", "llmproxy could not read the request body")
 			return
 		}
-		if ok {
-			key = k
+		// Cache hits cost nothing, so they are served even over budget.
+		if ok && p.cache != nil {
+			key = cacheKey(r, body)
 			if e, ok := p.cache.get(key); ok {
 				e.writeTo(w)
 				u, _ := usage.Parse(e.header.Get("Content-Type"), e.body)
 				p.finish(r, start, tag, e.status, u, true)
 				return
+			}
+		}
+		if ok && addUsage {
+			if b, changed := addStreamUsage(r.URL.Path, body); changed {
+				r.Body = io.NopCloser(bytes.NewReader(b))
+				r.ContentLength = int64(len(b))
+				addedUsage = true
 			}
 		}
 	}
@@ -108,11 +119,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rec := &recorder{ResponseWriter: w, status: http.StatusOK}
+	rec := &recorder{ResponseWriter: w, status: http.StatusOK, hideUsageChunk: addedUsage}
 	if key != "" {
 		rec.cacheMax = maxCacheEntrySize
 	}
 	p.rp.ServeHTTP(rec, r)
+	rec.flush()
 
 	if key != "" && rec.status == http.StatusOK && !rec.truncated {
 		p.cache.set(key, entry{status: rec.status, header: rec.Header().Clone(), body: bytes.Clone(rec.body.Bytes())})

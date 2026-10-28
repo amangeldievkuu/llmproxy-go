@@ -177,6 +177,14 @@ Requests for a model with no price are still recorded, with cost `0`, and logged
 
 `llmproxy stats` flags: `-db` (same as above) and `-since` (default `24h`).
 
+If a `.env` file exists in the current directory, its `KEY=VALUE` lines are loaded at startup. Variables already set in your shell take precedence, and flags override both.
+
+```sh
+# .env
+PORT=9000
+LLMPROXY_UPSTREAM=https://api.anthropic.com
+```
+
 The database is plain SQLite, so you can also query it directly:
 
 ```sh

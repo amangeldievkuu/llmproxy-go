@@ -22,6 +22,11 @@ func main() {
 		os.Exit(2)
 	}
 
+	if err := loadDotEnv(".env"); err != nil {
+		fmt.Fprintln(os.Stderr, "llmproxy:", err)
+		os.Exit(1)
+	}
+
 	var err error
 	switch cmd, args := os.Args[1], os.Args[2:]; cmd {
 	case "serve":

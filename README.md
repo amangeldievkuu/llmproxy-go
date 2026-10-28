@@ -80,8 +80,16 @@ POST /v1/chat/completions 200 gpt-4o-mini-2024-07-18 10 in / 10 out $0.000008 1.
 Then see the totals:
 
 ```sh
-llmproxy stats            # last 24 hours
-llmproxy stats -since 7d  # last 7 days
+llmproxy stats                                        # last 24 hours
+llmproxy stats -since 7d -by day                      # daily totals for the last week
+llmproxy stats -since 2026-09-01 -until 2026-10-01    # September
+```
+
+To use the numbers elsewhere, export them as CSV or JSON:
+
+```sh
+llmproxy stats -since 30d -by day,model -format csv > spend.csv
+llmproxy stats -since 30d -format json
 ```
 
 ### Use it from your code
@@ -193,7 +201,7 @@ Providers change prices, so you can override or add models with a JSON file of U
 }
 ```
 
-`input` and `output` are required. `cache_read` and `cache_write` default to the input price. `long_context_tokens` and `long_context` (a nested price) set higher rates for requests with more input tokens than that.
+`input` and `output` are required. `cache_read` and `cache_write` default to the input price, and `cache_write_1h` (Anthropic's 1-hour cache) defaults to `cache_write`. `long_context_tokens` and `long_context` (a nested price) set higher rates for requests with more input tokens than that.
 
 ```sh
 llmproxy serve -prices prices.json
@@ -217,7 +225,7 @@ Requests for a model with no price are still recorded, with cost `0`, and logged
 | `-stream-usage` | | `true` | Ask for token usage in streamed OpenAI Chat Completions requests |
 | `-retention` | `LLMPROXY_RETENTION` | `0` (keep all) | Delete records older than this at startup and daily, e.g. `90d` |
 
-`llmproxy stats` flags: `-db` (same as above) and `-since` (default `24h`). `llmproxy prune` flags: `-db`, `-older-than` (required) and `-dry-run`. Durations accept days, e.g. `7d` or `7d12h`. `llmproxy version` prints the version.
+`llmproxy stats` flags: `-db` (same as above), `-since` (default `24h`) and `-until` (default now; not included), which take a date like `2026-09-01` or a duration ago; `-by` (default `model,tag`; also `day`); and `-format` (`table`, `json` or `csv`). `llmproxy prune` flags: `-db`, `-older-than` (required) and `-dry-run`. Durations accept days, e.g. `7d` or `7d12h`. `llmproxy version` prints the version.
 
 If a `.env` file exists in the current directory, its `KEY=VALUE` lines are loaded at startup. Variables already set in your shell take precedence, and flags override both.
 
@@ -235,7 +243,7 @@ sqlite3 llmproxy.db "SELECT model, SUM(cost_usd) FROM requests GROUP BY model"
 
 ## Known limitations
 
-- **Costs are estimates.** Anthropic 1-hour cache writes are priced as 5-minute writes, and batch, priority and regional pricing are not modelled. Check your provider's invoice for exact figures.
+- **Costs are estimates.** Batch, priority and regional pricing are not modelled. Check your provider's invoice for exact figures.
 - **One upstream per process.** Run one proxy per provider.
 - **The response cache is in memory** and is cleared on restart.
 - **No authentication.** The proxy forwards whatever key the client sends. It listens on localhost by default; only change `-host` on a network you trust.

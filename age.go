@@ -53,3 +53,39 @@ func parseAge(s string) (time.Duration, error) {
 	}
 	return time.Duration(days)*24*time.Hour + d, nil
 }
+
+// moment is a flag.Value for a point in time: a date such as 2026-09-01
+// (midnight, local time) or how long ago, such as 7d or 36h.
+type moment struct {
+	date time.Time     // the date, if one was given
+	ago  time.Duration // otherwise, how long before now
+	set  bool          // whether the flag was given
+}
+
+// at returns the point in time, counting durations back from now.
+func (m moment) at(now time.Time) time.Time {
+	if !m.date.IsZero() {
+		return m.date
+	}
+	return now.Add(-m.ago)
+}
+
+func (m moment) String() string {
+	if !m.date.IsZero() {
+		return m.date.Format(time.DateOnly)
+	}
+	return age(m.ago).String()
+}
+
+func (m *moment) Set(s string) error {
+	if d, err := time.ParseInLocation(time.DateOnly, s, time.Local); err == nil {
+		*m = moment{date: d, set: true}
+		return nil
+	}
+	d, err := parseAge(s)
+	if err != nil {
+		return fmt.Errorf("invalid time %q (use a date like 2026-09-01 or a duration like 7d)", s)
+	}
+	*m = moment{ago: d, set: true}
+	return nil
+}

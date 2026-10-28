@@ -5,6 +5,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -130,18 +132,33 @@ func (s *Store) Vacuum(ctx context.Context) error {
 	return err
 }
 
-// Summary groups requests made at or after since by "model" or "tag",
-// most expensive first.
-func (s *Store) Summary(ctx context.Context, since time.Time, by string) ([]Row, error) {
-	if by != "model" && by != "tag" {
+// Summary groups the requests made at or after from, and before to unless to
+// is zero, by "model", "tag" or "day". Models and tags come most expensive
+// first. Days come oldest first, as dates in the time zone of from.
+func (s *Store) Summary(ctx context.Context, from, to time.Time, by string) ([]Row, error) {
+	var key string
+	switch by {
+	case "model", "tag":
+		key = by
+	case "day":
+		// SQLite's idea of local time may not match Go's, so group by
+		// 15-minute buckets and turn them into dates in Go. Every time zone
+		// offset is a whole number of quarter hours, so no bucket spans midnight.
+		key = "ts / 900000"
+	default:
 		return nil, fmt.Errorf("cannot group by %q", by)
 	}
+	where, args := "ts >= ?", []any{from.UnixMilli()}
+	if !to.IsZero() {
+		where += " AND ts < ?"
+		args = append(args, to.UnixMilli())
+	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT `+by+`, COUNT(*), SUM(cached), SUM(input_tokens), SUM(output_tokens), SUM(cost_usd)
+		SELECT `+key+`, COUNT(*), SUM(cached), SUM(input_tokens), SUM(output_tokens), SUM(cost_usd)
 		FROM requests
-		WHERE ts >= ?
-		GROUP BY `+by+`
-		ORDER BY SUM(cost_usd) DESC, COUNT(*) DESC`, since.UnixMilli())
+		WHERE `+where+`
+		GROUP BY `+key+`
+		ORDER BY SUM(cost_usd) DESC, COUNT(*) DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -155,5 +172,40 @@ func (s *Store) Summary(ctx context.Context, since time.Time, by string) ([]Row,
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if by == "day" {
+		return byDay(out, from.Location())
+	}
+	return out, nil
+}
+
+// byDay merges rows keyed by 15-minute bucket into rows keyed by date in loc,
+// oldest first.
+func byDay(buckets []Row, loc *time.Location) ([]Row, error) {
+	days := make(map[string]*Row)
+	for _, b := range buckets {
+		n, err := strconv.ParseInt(b.Key, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("bad time bucket %q: %w", b.Key, err)
+		}
+		date := time.UnixMilli(n * 900_000).In(loc).Format("2006-01-02")
+		d := days[date]
+		if d == nil {
+			d = &Row{Key: date}
+			days[date] = d
+		}
+		d.Requests += b.Requests
+		d.Cached += b.Cached
+		d.InputTokens += b.InputTokens
+		d.OutputTokens += b.OutputTokens
+		d.CostUSD += b.CostUSD
+	}
+	out := make([]Row, 0, len(days))
+	for _, d := range days {
+		out = append(out, *d)
+	}
+	slices.SortFunc(out, func(a, b Row) int { return strings.Compare(a.Key, b.Key) })
+	return out, nil
 }

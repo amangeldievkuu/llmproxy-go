@@ -61,7 +61,7 @@ func summary(t *testing.T, dbPath string, since time.Duration) []store.Row {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	rows, err := st.Summary(context.Background(), time.Now().Add(-since), "model")
+	rows, err := st.Summary(context.Background(), time.Now().Add(-since), time.Time{}, "model")
 	if err != nil {
 		t.Fatal(err)
 	}

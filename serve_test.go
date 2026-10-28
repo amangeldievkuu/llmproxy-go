@@ -54,14 +54,14 @@ func wait(t *testing.T, result <-chan error) error {
 	}
 }
 
-func summary(t *testing.T, dbPath string) []store.Row {
+func summary(t *testing.T, dbPath string, since time.Duration) []store.Row {
 	t.Helper()
 	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	rows, err := st.Summary(context.Background(), time.Now().Add(-time.Hour), "model")
+	rows, err := st.Summary(context.Background(), time.Now().Add(-since), "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestServeRecordsAndShutsDown(t *testing.T) {
 	if err := wait(t, result); err != nil {
 		t.Fatalf("serve returned %v", err)
 	}
-	rows := summary(t, dbPath)
+	rows := summary(t, dbPath, time.Hour)
 	if len(rows) != 1 || rows[0].Requests != 1 || rows[0].InputTokens != 10 {
 		t.Errorf("unexpected records %+v", rows)
 	}
@@ -130,7 +130,7 @@ func TestServeWaitsForOpenStreams(t *testing.T) {
 	if err := wait(t, result); err != nil {
 		t.Fatalf("serve returned %v", err)
 	}
-	rows := summary(t, dbPath)
+	rows := summary(t, dbPath, time.Hour)
 	if len(rows) != 1 || rows[0].OutputTokens != 2 {
 		t.Errorf("open stream not recorded before shutdown: %+v", rows)
 	}
@@ -148,5 +148,23 @@ func TestServeRejectsBadConfig(t *testing.T) {
 		if err := serve(context.Background(), args, nil); err == nil {
 			t.Errorf("bad -%s: expected an error", name)
 		}
+	}
+}
+
+func TestServeRetention(t *testing.T) {
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	dbPath := oldAndNewDB(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() {
+		errc <- serve(ctx, []string{"-port", "0", "-db", dbPath, "-retention", "90d"}, func(string) { cancel() })
+	}()
+	if err := wait(t, errc); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRecords(t, dbPath); n != 1 {
+		t.Errorf("%d records left, want only the recent one", n)
 	}
 }

@@ -33,7 +33,7 @@ TOTAL     42        12      5940   5920    $0.014595
 - **OpenAI and Anthropic**: Chat Completions, Responses and Messages APIs, JSON and streaming.
 - **Cost tracking**: built-in price table, overridable with a JSON file.
 - **Tags**: add an `X-Llmproxy-Tag` header to see spend per feature, user or environment.
-- **Daily budget**: requests get `429` once the day's spend reaches your limit.
+- **Daily budget**: requests get `429` once they would take the day's spend past your limit, counting requests that are still running.
 - **Prompt-cache aware**: OpenAI cached input and Anthropic cache reads and writes are priced at their own rates.
 - **Response cache**: identical requests (same API key, URL and body) can be answered from memory.
 - **One static binary**: pure Go, no cgo, no Docker, no external database.
@@ -81,7 +81,7 @@ Then see the totals:
 
 ```sh
 llmproxy stats            # last 24 hours
-llmproxy stats -since 168h  # last 7 days
+llmproxy stats -since 7d  # last 7 days
 ```
 
 ### Use it from your code
@@ -138,9 +138,33 @@ client.chat.completions.create(
 llmproxy serve -daily-budget 5
 ```
 
-Once today's recorded spend reaches $5, requests get `429` with an error body in the usual `{"error": {...}}` shape until midnight (local time). Cache hits are still served, since they cost nothing.
+Requests get `429` with an error body in the usual `{"error": {...}}` shape once they would take the day's spend past $5, until midnight (local time). Cache hits are still served, since they cost nothing.
 
-The budget is a soft limit: a request's cost is only known once it finishes, so requests already in flight when the limit is reached still complete, and requests for models with no known price count as `$0`. Proxies that share a database file share the budget.
+A request's real cost is only known once it finishes, so the proxy also counts requests that are still running: each one holds back the average cost of its model's recent requests until it is recorded. That keeps a burst of parallel calls from all getting through before any of them is counted. Near the limit, this can refuse a request that would have fit.
+
+The budget can still be passed by a little:
+
+- Right after the proxy starts, a model's first request isn't held back, since there is no average yet.
+- A request can cost more than its model's average.
+- Requests for models with no known price count as `$0`.
+- Proxies that share a database file share the recorded spend, but not each other's running requests.
+
+## Cleaning up old records
+
+Records are kept until you delete them. To delete old ones once:
+
+```sh
+llmproxy prune -older-than 90d -dry-run   # show how many would go
+llmproxy prune -older-than 90d
+```
+
+Or have `serve` do it at startup and once a day:
+
+```sh
+llmproxy serve -retention 90d
+```
+
+Both are safe while the proxy is running. `prune` also shrinks the database file.
 
 ## Response cache
 
@@ -191,8 +215,9 @@ Requests for a model with no price are still recorded, with cost `0`, and logged
 | `-cache-ttl` | | `0` (off) | How long to cache identical requests, e.g. `10m` |
 | `-prices` | | | JSON file with extra or overriding prices |
 | `-stream-usage` | | `true` | Ask for token usage in streamed OpenAI Chat Completions requests |
+| `-retention` | `LLMPROXY_RETENTION` | `0` (keep all) | Delete records older than this at startup and daily, e.g. `90d` |
 
-`llmproxy stats` flags: `-db` (same as above) and `-since` (default `24h`). `llmproxy version` prints the version.
+`llmproxy stats` flags: `-db` (same as above) and `-since` (default `24h`). `llmproxy prune` flags: `-db`, `-older-than` (required) and `-dry-run`. Durations accept days, e.g. `7d` or `7d12h`. `llmproxy version` prints the version.
 
 If a `.env` file exists in the current directory, its `KEY=VALUE` lines are loaded at startup. Variables already set in your shell take precedence, and flags override both.
 

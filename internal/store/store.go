@@ -107,6 +107,29 @@ func (s *Store) SpentSince(ctx context.Context, t time.Time) (float64, error) {
 	return spent, err
 }
 
+// CountBefore returns the number of requests made before t.
+func (s *Store) CountBefore(ctx context.Context, t time.Time) (int64, error) {
+	var n int64
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE ts < ?`, t.UnixMilli()).Scan(&n)
+	return n, err
+}
+
+// Prune deletes the requests made before t and returns how many it deleted.
+func (s *Store) Prune(ctx context.Context, t time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM requests WHERE ts < ?`, t.UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// Vacuum rebuilds the database file so that space freed by Prune is given
+// back to the disk.
+func (s *Store) Vacuum(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `VACUUM`)
+	return err
+}
+
 // Summary groups requests made at or after since by "model" or "tag",
 // most expensive first.
 func (s *Store) Summary(ctx context.Context, since time.Time, by string) ([]Row, error) {

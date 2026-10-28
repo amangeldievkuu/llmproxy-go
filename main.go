@@ -16,6 +16,7 @@ const usageText = `llmproxy tracks the cost and latency of your LLM API calls.
 Usage:
   llmproxy serve [flags]   run the proxy
   llmproxy stats [flags]   show spend from the local database
+  llmproxy prune [flags]   delete old records from the local database
   llmproxy version         print the version
 
 Run "llmproxy <command> -h" to see a command's flags.
@@ -38,6 +39,8 @@ func main() {
 		err = runServe(args)
 	case "stats":
 		err = runStats(args, os.Stdout)
+	case "prune":
+		err = runPrune(args, os.Stdout)
 	case "version", "-version", "--version":
 		fmt.Println("llmproxy", buildVersion())
 	case "help", "-h", "--help":

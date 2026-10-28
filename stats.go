@@ -13,23 +13,29 @@ import (
 	"github.com/amangeldievkuu/llmproxy-go/internal/store"
 )
 
+// openExisting opens the database at path, which "llmproxy serve" must have created.
+func openExisting(path string) (*store.Store, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("no database at %s (run \"llmproxy serve\" first)", path)
+	}
+	return store.Open(path)
+}
+
 func runStats(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("stats", flag.ExitOnError)
 	dbPath := fs.String("db", envOr("LLMPROXY_DB", "llmproxy.db"), "SQLite file for usage records (env LLMPROXY_DB)")
-	since := fs.Duration("since", 24*time.Hour, "how far back to look, e.g. 1h, 24h, 168h")
+	since := age(24 * time.Hour)
+	fs.Var(&since, "since", "how far back to look, e.g. 1h, 24h, 7d")
 	fs.Parse(args)
 
-	if _, err := os.Stat(*dbPath); err != nil {
-		return fmt.Errorf("no database at %s (run \"llmproxy serve\" first)", *dbPath)
-	}
-	st, err := store.Open(*dbPath)
+	st, err := openExisting(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
 	ctx := context.Background()
-	from := time.Now().Add(-*since)
+	from := time.Now().Add(-time.Duration(since))
 	byModel, err := st.Summary(ctx, from, "model")
 	if err != nil {
 		return err
@@ -39,7 +45,7 @@ func runStats(args []string, out io.Writer) error {
 		return err
 	}
 
-	fmt.Fprintf(out, "Since %s (last %s)\n\n", from.Format("2006-01-02 15:04"), *since)
+	fmt.Fprintf(out, "Since %s (last %s)\n\n", from.Format("2006-01-02 15:04"), since)
 	if len(byModel) == 0 {
 		fmt.Fprintln(out, "No requests recorded.")
 		return nil

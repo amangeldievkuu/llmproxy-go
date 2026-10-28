@@ -92,3 +92,31 @@ func TestOpenSetsPragmas(t *testing.T) {
 		t.Errorf("budget query does not use the covering index: %s", plan)
 	}
 }
+
+func TestPrune(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	now := time.Now()
+	for _, age := range []time.Duration{100 * 24 * time.Hour, 91 * 24 * time.Hour, 89 * 24 * time.Hour, 0} {
+		if err := s.Insert(ctx, Record{Time: now.Add(-age), Model: "m", CostUSD: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cutoff := now.Add(-90 * 24 * time.Hour)
+
+	if n, err := s.CountBefore(ctx, cutoff); err != nil || n != 2 {
+		t.Fatalf("CountBefore() = %d, %v; want 2", n, err)
+	}
+	if n, err := s.Prune(ctx, cutoff); err != nil || n != 2 {
+		t.Fatalf("Prune() = %d, %v; want 2", n, err)
+	}
+	if err := s.Vacuum(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if spent, _ := s.SpentSince(ctx, time.Time{}); spent != 2 {
+		t.Errorf("%v left after pruning, want the 2 recent requests", spent)
+	}
+	if n, _ := s.Prune(ctx, cutoff); n != 0 {
+		t.Errorf("second Prune() deleted %d", n)
+	}
+}

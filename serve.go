@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -46,6 +47,14 @@ func serve(ctx context.Context, args []string, ready func(addr string)) error {
 	pricesPath := fs.String("prices", "", "JSON file with extra or overriding model prices")
 	streamUsage := fs.Bool("stream-usage", true,
 		"ask for token usage in streamed OpenAI Chat Completions requests that don't, so they can be priced")
+	var retention age
+	if v := os.Getenv("LLMPROXY_RETENTION"); v != "" {
+		if err := retention.Set(v); err != nil {
+			return fmt.Errorf("LLMPROXY_RETENTION: %w", err)
+		}
+	}
+	fs.Var(&retention, "retention",
+		"delete records older than this at startup and daily, e.g. 90d (0 = keep all; env LLMPROXY_RETENTION)")
 	fs.Parse(args)
 
 	target, err := url.Parse(*upstream)
@@ -64,6 +73,23 @@ func serve(ctx context.Context, args []string, ready func(addr string)) error {
 		return err
 	}
 	defer st.Close()
+
+	var pruner sync.WaitGroup
+	if keep := time.Duration(retention); keep > 0 {
+		pruneOld(st, keep)
+		pruner.Go(func() {
+			tick := time.NewTicker(24 * time.Hour)
+			defer tick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+					pruneOld(st, keep)
+				}
+			}
+		})
+	}
 
 	p := proxy.New(proxy.Config{
 		Upstream:    target,
@@ -94,6 +120,7 @@ func serve(ctx context.Context, args []string, ready func(addr string)) error {
 			srv.Close() // cut off streams that are still open; they are recorded as they end
 		}
 		p.Wait()
+		pruner.Wait()
 	}()
 
 	log.Printf("llmproxy listening on http://%s -> %s (db %s)", addr, target, *dbPath)
@@ -105,6 +132,9 @@ func serve(ctx context.Context, args []string, ready func(addr string)) error {
 	}
 	if *cacheTTL > 0 {
 		log.Printf("response cache: %s", *cacheTTL)
+	}
+	if retention > 0 {
+		log.Printf("keeping records for %s", retention)
 	}
 
 	if ready != nil {
@@ -126,4 +156,15 @@ func isLoopback(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// pruneOld deletes records older than keep and logs how many it deleted.
+func pruneOld(st *store.Store, keep time.Duration) {
+	n, err := st.Prune(context.Background(), time.Now().Add(-keep))
+	switch {
+	case err != nil:
+		log.Printf("retention: %v", err)
+	case n > 0:
+		log.Printf("retention: deleted %d records older than %s", n, age(keep))
+	}
 }

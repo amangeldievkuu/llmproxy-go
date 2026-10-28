@@ -19,7 +19,21 @@ import (
 	"github.com/amangeldievkuu/llmproxy-go/internal/store"
 )
 
+// runServe runs the proxy until Ctrl+C or SIGTERM. A second signal exits at once.
 func runServe(args []string) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop() // restore the default handling, so another Ctrl+C kills the process
+	}()
+	return serve(ctx, args, nil)
+}
+
+// serve runs the proxy until ctx ends, then stops accepting connections and
+// lets open requests finish (and get recorded) before the database closes.
+// If ready is not nil, it is called with the address once the proxy is listening.
+func serve(ctx context.Context, args []string, ready func(addr string)) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	host := fs.String("host", envOr("LLMPROXY_HOST", "127.0.0.1"),
 		"address to listen on; 0.0.0.0 exposes the proxy to your network (env LLMPROXY_HOST)")
@@ -30,6 +44,8 @@ func runServe(args []string) error {
 	budget := fs.Float64("daily-budget", 0, "answer 429 once this many USD are spent today (0 = no limit)")
 	cacheTTL := fs.Duration("cache-ttl", 0, "serve identical requests from memory for this long, e.g. 10m (0 = off)")
 	pricesPath := fs.String("prices", "", "JSON file with extra or overriding model prices")
+	streamUsage := fs.Bool("stream-usage", true,
+		"ask for token usage in streamed OpenAI Chat Completions requests that don't, so they can be priced")
 	fs.Parse(args)
 
 	target, err := url.Parse(*upstream)
@@ -55,24 +71,23 @@ func runServe(args []string) error {
 		Prices:      prices,
 		DailyBudget: *budget,
 		CacheTTL:    *cacheTTL,
+		StreamUsage: *streamUsage,
 	})
-	addr := net.JoinHostPort(*host, *port)
+	ln, err := net.Listen("tcp", net.JoinHostPort(*host, *port))
+	if err != nil {
+		return err
+	}
+	addr := ln.Addr().String()
 	srv := &http.Server{
-		Addr:              addr,
 		Handler:           p,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
 
-	// On Ctrl+C, stop accepting connections and let in-flight requests finish
-	// (and get recorded) before the database closes. A second Ctrl+C exits at once.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		<-ctx.Done()
-		stop()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -92,7 +107,11 @@ func runServe(args []string) error {
 		log.Printf("response cache: %s", *cacheTTL)
 	}
 
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	if ready != nil {
+		ready(addr)
+	}
+
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	log.Print("shutting down, waiting for open requests (Ctrl+C again to quit now)")
